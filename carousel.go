@@ -5,9 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/mileusna/crontab"
 	"sync"
 	"time"
+
+	"github.com/mileusna/crontab"
 )
 
 var (
@@ -25,82 +26,105 @@ func NewRider(name string) *Rider {
 	}
 }
 
-type Coordinator interface {
+type Executor interface {
 	Execute(ctx context.Context, handler func()) error
 }
 
-type Carousel struct {
-	members          map[*Rider]bool
-	order            *list.List
-	runner           Coordinator
-	timeout          *time.Duration
-	readinessChecker ReadinessChecker
+type Carousel[T any] struct {
 	mu               sync.Mutex
+	runner           Executor
+	readinessChecker ReadinessChecker[T]
+	timeout          *time.Duration
+	chooser          Chooser[T]
 }
 
-func NewCarousel(exec Coordinator, readinessChecker ReadinessChecker, timeout *time.Duration) *Carousel {
-	if readinessChecker == nil {
-		readinessChecker = NoopReadinessChecker{}
+func NewCarousel[T any](exec Executor, chooser Chooser[T], timeout *time.Duration) *Carousel[T] {
+	return &Carousel[T]{
+		runner:  exec,
+		timeout: timeout,
+		chooser: chooser,
 	}
-	return &Carousel{
-		members:          make(map[*Rider]bool),
-		order:            list.New(),
-		runner:           exec,
-		timeout:          timeout,
+}
+
+type HandlerFunc[T any] func(context.Context, T) error
+
+type Chooser[T any] interface {
+	Choose(context.Context) (T, error)
+}
+
+func NewOrderedChooser[T any](members *list.List) *OrderedChooser[T] {
+	return &OrderedChooser[T]{
+		members: members,
+	}
+}
+
+type OrderedChooser[T any] struct {
+	members *list.List
+	mu      sync.Mutex
+}
+
+func (c *OrderedChooser[T]) Choose(ctx context.Context) (T, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	chosen, ok := c.members.Front().Value.(T)
+	if !ok {
+		return chosen, fmt.Errorf("cannot cast list.Element to T")
+	}
+	c.members.MoveToBack(c.members.Front())
+	return chosen, nil
+}
+
+type ReadinessChooser[T any] struct {
+	base             Chooser[T]
+	readinessChecker ReadinessChecker[T]
+}
+
+func NewReadinessChoooser[T any](base Chooser[T], readinessChecker ReadinessChecker[T]) *ReadinessChooser[T] {
+	return &ReadinessChooser[T]{
+		base:             base,
 		readinessChecker: readinessChecker,
 	}
 }
 
-func (s *Carousel) AddRider(p *Rider) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if p == nil {
-		return fmt.Errorf("presenter is nil")
-	}
-	if s.members[p] {
-		return ErrAlreadyMember
-	}
-	s.members[p] = true
-	s.order.PushBack(p)
-	return nil
-}
-
-func (s *Carousel) RemoveRider(p *Rider) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.members[p]; !ok {
-		return fmt.Errorf("rider is not a member of the carousel")
-	}
-
-	delete(s.members, p)
-	for e := s.order.Front(); e != nil; e = e.Next() {
-		if e.Value == p {
-			s.order.Remove(e)
-			break
+func (r *ReadinessChooser[T]) Choose(ctx context.Context) (T, error) {
+	for {
+		var chosen T
+		chosen, err := r.base.Choose(ctx)
+		if err != nil {
+			return chosen, err
 		}
+
+		ok, err := r.readinessChecker.IsReady(ctx, chosen)
+		if err != nil {
+			return chosen, err
+		}
+		if !ok {
+			continue
+		}
+		return chosen, nil
 	}
-	return fmt.Errorf("rider is not a member of the carousel list")
 }
 
-type HandlerFunc func(context.Context, *Rider) error
+type NoopReadinessChecker[T any] struct {
+}
 
-func (s *Carousel) HandleRide(ctx context.Context, handler HandlerFunc) error {
+func (c *NoopReadinessChecker[T]) IsReady(context.Context, T) (bool, error) {
+	return true, nil
+}
+
+type Scheduler struct {
+	mu sync.Mutex
+}
+
+// HandleRide calls runner to execute a closure that will choose a rider and then apply handler function on the rider
+func (s *Carousel[T]) HandleRide(ctx context.Context, handler HandlerFunc[T]) error {
 	defer ctx.Done()
 	errs := make(chan error)
 	if err := s.runner.Execute(ctx, func() {
-		for ready := false; !ready; {
-			presenter, ok := s.order.Front().Value.(*Rider)
-			if !ok {
-				errs <- fmt.Errorf("cannot cast list.Element to *Rider")
-			}
-			ready = s.handleReadiness(ctx, presenter, s.timeout)
-			s.order.MoveToBack(s.order.Front())
-			if !ready {
-				continue
-			}
-			if err := handler(ctx, presenter); err != nil {
-				errs <- fmt.Errorf("handler error: %w", err)
-			}
+		err := s.handleChoice(ctx, handler)
+		if err != nil {
+			errs <- err
+			return
 		}
 	}); err != nil {
 		return fmt.Errorf("error adding job: %w", err)
@@ -113,24 +137,20 @@ func (s *Carousel) HandleRide(ctx context.Context, handler HandlerFunc) error {
 	}
 }
 
-type ReadinessChecker interface {
-	IsReady(ctx context.Context, presenter *Rider) bool
-}
-
-type NoopReadinessChecker struct {
-}
-
-func (NoopReadinessChecker) IsReady(context.Context, *Rider) bool {
-	return true
-}
-
-func (s *Carousel) handleReadiness(ctx context.Context, presenter *Rider, timeout *time.Duration) bool {
-	if timeout != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, *timeout)
-		defer cancel()
+func (s *Carousel[T]) handleChoice(ctx context.Context, handler HandlerFunc[T]) error {
+	rider, err := s.chooser.Choose(ctx)
+	if err != nil {
+		return err
 	}
-	return s.readinessChecker.IsReady(ctx, presenter)
+
+	if err = handler(ctx, rider); err != nil {
+		return err
+	}
+	return nil
+}
+
+type ReadinessChecker[T any] interface {
+	IsReady(ctx context.Context, item T) (bool, error)
 }
 
 type CronCoordinator struct {
@@ -149,22 +169,20 @@ func (c *CronCoordinator) Execute(ctx context.Context, schedule string, handler 
 	if err := c.exec.AddJob(schedule, handler); err != nil {
 		return fmt.Errorf("error adding job: %w", err)
 	}
-	select {
-	case <-ctx.Done():
-		c.exec.Shutdown()
-		return ctx.Err()
-	}
+	<-ctx.Done()
+	c.exec.Shutdown()
+	return ctx.Err()
 }
 
-type EveryCoordinator struct {
+type EveryExecutor struct {
 	every time.Duration
 }
 
-func NewEveryCoordinator(every time.Duration) *EveryCoordinator {
-	return &EveryCoordinator{every: every}
+func NewEveryExecutor(every time.Duration) *EveryExecutor {
+	return &EveryExecutor{every: every}
 }
 
-func (e *EveryCoordinator) Execute(ctx context.Context, handler func()) error {
+func (e *EveryExecutor) Execute(ctx context.Context, handler func()) error {
 	for {
 		select {
 		case <-ctx.Done():
