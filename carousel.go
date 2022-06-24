@@ -77,10 +77,13 @@ func (s *Carousel) HandleRide(ctx context.Context, handler HandlerFunc) error {
 				errs <- fmt.Errorf("cannot cast list.Element to *Rider")
 			}
 			ready = s.handleReadiness(ctx, presenter, s.timeout)
+			s.order.MoveToBack(s.order.Front())
+			if !ready {
+				continue
+			}
 			if err := handler(ctx, presenter); err != nil {
 				errs <- fmt.Errorf("handler error: %w", err)
 			}
-			s.order.MoveToBack(s.order.Front())
 		}
 	}); err != nil {
 		return fmt.Errorf("error adding job: %w", err)
@@ -105,8 +108,10 @@ func (NoopReadinessChecker) IsReady(context.Context, *Rider) bool {
 }
 
 func (s *Carousel) handleReadiness(ctx context.Context, presenter *Rider, timeout *time.Duration) bool {
-	if timeout == nil {
-		return true
+	if timeout != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
 	}
 	return s.readinessChecker.IsReady(ctx, presenter)
 }
