@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/mileusna/crontab"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,7 @@ type Carousel struct {
 	runner           Coordinator
 	timeout          *time.Duration
 	readinessChecker ReadinessChecker
+	mu               sync.Mutex
 }
 
 func NewCarousel(exec Coordinator, readinessChecker ReadinessChecker, timeout *time.Duration) *Carousel {
@@ -50,6 +52,8 @@ func NewCarousel(exec Coordinator, readinessChecker ReadinessChecker, timeout *t
 }
 
 func (s *Carousel) AddRider(p *Rider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if p == nil {
 		return fmt.Errorf("presenter is nil")
 	}
@@ -61,8 +65,21 @@ func (s *Carousel) AddRider(p *Rider) error {
 	return nil
 }
 
-func (s *Carousel) RemoveRider(p *Rider) {
+func (s *Carousel) RemoveRider(p *Rider) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.members[p]; !ok {
+		return fmt.Errorf("rider is not a member of the carousel")
+	}
+
 	delete(s.members, p)
+	for e := s.order.Front(); e != nil; e = e.Next() {
+		if e.Value == p {
+			s.order.Remove(e)
+			break
+		}
+	}
+	return fmt.Errorf("rider is not a member of the carousel list")
 }
 
 type HandlerFunc func(context.Context, *Rider) error

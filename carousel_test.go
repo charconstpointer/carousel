@@ -52,7 +52,7 @@ type EveryOtherReadinessChecker struct {
 	mu      sync.Mutex
 }
 
-func (e *EveryOtherReadinessChecker) IsReady(ctx context.Context, presenter *carousel.Rider) bool {
+func (e *EveryOtherReadinessChecker) IsReady(context.Context, *carousel.Rider) bool {
 	e.mu.Lock()
 	defer func() {
 		e.counter++
