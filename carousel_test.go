@@ -20,8 +20,8 @@ func TestScheduler_HandleSchedule(t *testing.T) {
 		members.PushBack(m)
 	}
 	orderedChooser := carousel.NewOrderedChooser[*carousel.Rider](members)
-	readinessChecker := &carousel.NoopReadinessChecker[*carousel.Rider]{}
-	readinessChooser := carousel.NewReadinessChoooser[*carousel.Rider](orderedChooser, readinessChecker)
+	readinessChecker := carousel.NewNoopReadinessChecker[*carousel.Rider]()
+	readinessChooser := carousel.NewReadinessChooser[*carousel.Rider](orderedChooser, readinessChecker)
 	exec := carousel.NewEveryExecutor(time.Nanosecond)
 	scheduler := carousel.NewCarousel[*carousel.Rider](exec, readinessChooser, nil)
 

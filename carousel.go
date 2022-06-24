@@ -3,16 +3,11 @@ package carousel
 import (
 	"container/list"
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/mileusna/crontab"
-)
-
-var (
-	ErrAlreadyMember = errors.New("presenter is already a member of the team")
 )
 
 type Rider struct {
@@ -63,7 +58,7 @@ type OrderedChooser[T any] struct {
 	mu      sync.Mutex
 }
 
-func (c *OrderedChooser[T]) Choose(ctx context.Context) (T, error) {
+func (c *OrderedChooser[T]) Choose(_ context.Context) (T, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	chosen, ok := c.members.Front().Value.(T)
@@ -79,7 +74,7 @@ type ReadinessChooser[T any] struct {
 	readinessChecker ReadinessChecker[T]
 }
 
-func NewReadinessChoooser[T any](base Chooser[T], readinessChecker ReadinessChecker[T]) *ReadinessChooser[T] {
+func NewReadinessChooser[T any](base Chooser[T], readinessChecker ReadinessChecker[T]) *ReadinessChooser[T] {
 	return &ReadinessChooser[T]{
 		base:             base,
 		readinessChecker: readinessChecker,
@@ -108,12 +103,12 @@ func (r *ReadinessChooser[T]) Choose(ctx context.Context) (T, error) {
 type NoopReadinessChecker[T any] struct {
 }
 
-func (c *NoopReadinessChecker[T]) IsReady(context.Context, T) (bool, error) {
-	return true, nil
+func NewNoopReadinessChecker[T any]() *NoopReadinessChecker[T] {
+	return &NoopReadinessChecker[T]{}
 }
 
-type Scheduler struct {
-	mu sync.Mutex
+func (c *NoopReadinessChecker[T]) IsReady(_ context.Context, _ T) (bool, error) {
+	return true, nil
 }
 
 // HandleRide calls runner to execute a closure that will choose a rider and then apply handler function on the rider
